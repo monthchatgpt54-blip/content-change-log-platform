@@ -35,6 +35,8 @@ The change log must let an editor, SEO lead, client, or publisher understand exa
 - Make each change atomic. A reviewer should be able to approve one entry without accepting unrelated edits.
 - Use exact excerpts so changes can be applied safely and reversed.
 - Protect the page's original meaning, layout, links, shortcodes, and structured markup.
+- Classify paragraphs, headings, bullets, table rows, quotes, and code before reviewing them.
+- Keep every bullet atomic, retain all unaffected bullet sentences, and preserve table delimiters and cell counts.
 
 ## Review gates
 

@@ -15,6 +15,13 @@
       "when": 1788533418550,
       "tag": "0001_huge_wolfsbane",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1788537577682,
+      "tag": "0002_red_morgan_stark",
+      "breakpoints": true
     }
   ]
 }

@@ -23,6 +23,7 @@ export async function POST(request: Request) {
     const rechecked = input.action === "recheck" && input.comment
       ? await recheckFinding({
           exactLocation: change.exactLocation,
+          contentKind: change.contentKind as "paragraph" | "heading" | "bullet" | "table_row" | "quote" | "code" | "page",
           category: change.category,
           issue: change.issue,
           action: change.action as "CLEAN" | "CORRECT" | "REWRITE" | "ADD" | "REMOVE" | "VERIFY",

@@ -67,6 +67,7 @@ export async function GET(request: Request) {
             siteId: contentItems.siteId,
             reference: changeEntries.reference,
             exactLocation: changeEntries.exactLocation,
+            contentKind: changeEntries.contentKind,
             category: changeEntries.category,
             issue: changeEntries.issue,
             action: changeEntries.action,

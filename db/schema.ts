@@ -150,6 +150,7 @@ export const changeEntries = sqliteTable(
     sequence: integer("sequence").notNull(),
     reference: text("reference").notNull(),
     exactLocation: text("exact_location").notNull(),
+    contentKind: text("content_kind").notNull().default("paragraph"),
     category: text("category").notNull(),
     issue: text("issue").notNull(),
     action: text("action").notNull(),

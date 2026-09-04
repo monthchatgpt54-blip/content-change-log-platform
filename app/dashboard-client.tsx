@@ -100,6 +100,7 @@ type ChangeEntry = {
   siteId: string;
   reference: string;
   exactLocation: string;
+  contentKind: string;
   category: string;
   issue: string;
   action: string;
@@ -446,7 +447,7 @@ function ChangeLog({ data, reviewMode = false, refresh }: { data: Workspace; rev
       </Card>
 
       {selected && <Card className="h-fit border-0 shadow-[0_16px_45px_rgba(16,39,29,.07)]">
-        <CardHeader className="border-b"><div className="flex items-center justify-between gap-2"><Badge variant="outline">{selected.reference}</Badge><Badge variant="outline" className={statusTone[selected.status]}>{prettyStatus(selected.status)}</Badge></div><CardTitle className="pt-2 text-lg">{selected.exactLocation}</CardTitle><p className="text-sm text-muted-foreground">{selected.category} · {selected.confidence}% confidence</p></CardHeader>
+        <CardHeader className="border-b"><div className="flex items-center justify-between gap-2"><Badge variant="outline">{selected.reference}</Badge><Badge variant="outline" className={statusTone[selected.status]}>{prettyStatus(selected.status)}</Badge></div><CardTitle className="pt-2 text-lg">{selected.exactLocation}</CardTitle><p className="text-sm text-muted-foreground">{prettyStatus(selected.contentKind)} · {selected.category} · {selected.confidence}% confidence</p></CardHeader>
         <CardContent className="space-y-5 p-5">
           <div><p className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Before</p><p className="diff-before rounded-r-lg p-4 text-sm leading-6">{selected.beforeText}</p></div>
           <div><p className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">After</p><p className="diff-after rounded-r-lg p-4 text-sm leading-6">{selected.afterText}</p></div>

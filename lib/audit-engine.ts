@@ -1,7 +1,14 @@
 import { env } from "cloudflare:workers";
+import {
+  excerptContaining,
+  parseContentBlocks,
+  type ContentBlock,
+  type ContentKind,
+} from "@/lib/content-structure";
 
 export type AuditFinding = {
   exactLocation: string;
+  contentKind: ContentKind;
   category: string;
   issue: string;
   action: "CLEAN" | "CORRECT" | "REWRITE" | "ADD" | "REMOVE" | "VERIFY";
@@ -19,7 +26,11 @@ export type AuditResult = {
   score: number;
   summary: string;
   findings: AuditFinding[];
-  checks: Array<{ name: string; status: "pass" | "warning" | "fail"; detail: string }>;
+  checks: Array<{
+    name: string;
+    status: "pass" | "warning" | "fail";
+    detail: string;
+  }>;
 };
 
 type AuditInput = {
@@ -45,192 +56,282 @@ const britishToAmerican: Record<string, string> = {
   licence: "license",
 };
 
-function locationFor(index: number, value: string) {
-  if (/^#{1,6}\s/.test(value)) return `Heading ${index + 1}`;
-  return `Paragraph ${index + 1}`;
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^$()|[\]\\{}]/g, "\\$&");
 }
 
-function firstSentence(value: string) {
-  return value.match(/.*?[.!?](?:\s|$)/)?.[0]?.trim() ?? value.slice(0, 260).trim();
+function isTableSeparator(block: ContentBlock) {
+  return block.kind === "table_row" && /^\s*\|?\s*:?-{3,}/.test(block.raw);
 }
 
-function cleanMarkdown(value: string) {
-  return value.replace(/^#{1,6}\s+/, "").trim();
+function structuralExcerpt(block: ContentBlock, pattern: RegExp) {
+  return excerptContaining(block, pattern);
+}
+
+function replacement(
+  block: ContentBlock,
+  pattern: RegExp | string,
+  next: string,
+) {
+  const before = structuralExcerpt(
+    block,
+    typeof pattern === "string" ? new RegExp(escapeRegExp(pattern), "i") : pattern,
+  );
+  return { before, after: before.replace(pattern, next) };
 }
 
 function rulesAudit(input: AuditInput): AuditResult {
-  const blocks = input.content
-    .split(/\n\s*\n/)
-    .map((value) => value.trim())
-    .filter(Boolean);
+  const blocks = parseContentBlocks(input.content);
   const findings: AuditFinding[] = [];
-  const normalizedSeen = new Map<string, number>();
+  const normalizedSeen = new Map<string, string>();
 
-  for (const [index, raw] of blocks.entries()) {
-    const value = cleanMarkdown(raw);
-    const normalized = value.toLowerCase().replace(/[^a-z0-9\s]/g, "").replace(/\s+/g, " ");
-    const location = locationFor(index, raw);
+  for (const block of blocks) {
+    if (block.kind === "code" || isTableSeparator(block) || !block.plainText) continue;
+    const normalized = block.plainText
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
 
-    if (normalized.length > 70 && normalizedSeen.has(normalized)) {
+    if (normalized.length > 50 && normalizedSeen.has(normalized)) {
       findings.push({
-        exactLocation: location,
+        exactLocation: block.location,
+        contentKind: block.kind,
         category: "Duplication",
-        issue: `Duplicates paragraph ${Number(normalizedSeen.get(normalized)) + 1}`,
+        issue: "Duplicates " + normalizedSeen.get(normalized),
         action: "REMOVE",
         priority: "High",
-        beforeText: value,
-        afterText: "Remove this duplicate passage and keep the stronger original occurrence.",
-        reason: "Repeated blocks dilute the page and make the reading experience feel unedited.",
-        evidence: "Exact normalized paragraph match inside the submitted content.",
+        beforeText: block.raw,
+        afterText: "Remove this duplicate " + block.kind.replace("_", " ") + " and keep the stronger original occurrence.",
+        reason: "Repeated content dilutes the page and makes the reading experience feel unedited.",
+        evidence: "Exact normalized " + block.kind.replace("_", " ") + " match inside the submitted content.",
         confidence: 99,
       });
     } else {
-      normalizedSeen.set(normalized, index);
+      normalizedSeen.set(normalized, block.location);
     }
 
-    const claim = value.match(claimPattern)?.[0];
+    const claim = block.plainText.match(claimPattern)?.[0];
     if (claim) {
+      const edit = replacement(block, claimPattern, "evidence-led");
       findings.push({
-        exactLocation: location,
+        exactLocation: block.location,
+        contentKind: block.kind,
         category: "Accuracy and trust",
-        issue: `Unsupported absolute claim: “${claim}”`,
+        issue: "Unsupported absolute claim: “" + claim + "”",
         action: "CORRECT",
         priority: "High",
-        beforeText: firstSentence(value),
-        afterText: firstSentence(value).replace(claimPattern, "evidence-led"),
-        reason: "A native editorial review should replace unverified superlatives with a precise, supportable statement.",
+        beforeText: edit.before,
+        afterText: edit.after,
+        reason: "Replaces an unverified superlative while preserving the original block type and surrounding content.",
         evidence: "The supplied copy contains an absolute performance claim without a cited source.",
         confidence: 94,
       });
     }
 
-    if (value.includes("—")) {
+    if (block.raw.includes("—")) {
+      const edit = replacement(block, "—", ", ");
       findings.push({
-        exactLocation: location,
+        exactLocation: block.location,
+        contentKind: block.kind,
         category: "Voice and punctuation",
         issue: "Em dash conflicts with the selected editorial style",
         action: "CLEAN",
         priority: "Low",
-        beforeText: firstSentence(value),
-        afterText: firstSentence(value).replaceAll(" — ", ". ").replaceAll("—", ", "),
-        reason: "Uses standard American punctuation while preserving the sentence meaning.",
+        beforeText: edit.before,
+        afterText: edit.after.replaceAll(" — ", ". "),
+        reason: "Uses the selected punctuation style without flattening a bullet or table row into paragraph text.",
         evidence: "Direct punctuation match.",
         confidence: 98,
       });
     }
 
     const british = Object.keys(britishToAmerican).find((word) =>
-      new RegExp(`\\b${word}\\b`, "i").test(value),
+      new RegExp("\\b" + word + "\\b", "i").test(block.plainText),
     );
     if (british && input.languageStandard.toLowerCase().includes("american")) {
-      const pattern = new RegExp(`\\b${british}\\b`, "gi");
+      const pattern = new RegExp("\\b" + british + "\\b", "gi");
+      const edit = replacement(block, pattern, britishToAmerican[british]);
       findings.push({
-        exactLocation: location,
+        exactLocation: block.location,
+        contentKind: block.kind,
         category: "American English",
-        issue: `British spelling detected: “${british}”`,
+        issue: "British spelling detected: “" + british + "”",
         action: "CLEAN",
         priority: "Medium",
-        beforeText: firstSentence(value),
-        afterText: firstSentence(value).replace(pattern, britishToAmerican[british]),
-        reason: "Aligns spelling with the selected United States language standard.",
+        beforeText: edit.before,
+        afterText: edit.after,
+        reason: "Aligns spelling with the selected United States language standard while retaining the original structure.",
         evidence: "Dictionary-based language-standard check.",
         confidence: 99,
       });
     }
 
-    if (genericCtaPattern.test(value)) {
+    if (genericCtaPattern.test(block.plainText)) {
+      const edit = replacement(
+        block,
+        genericCtaPattern,
+        "discuss the scope and next step",
+      );
       findings.push({
-        exactLocation: location,
+        exactLocation: block.location,
+        contentKind: block.kind,
         category: "Conversion clarity",
         issue: "Generic or repetitive call to action",
         action: "REWRITE",
         priority: "Medium",
-        beforeText: firstSentence(value),
-        afterText: "Discuss the scope, priorities, and expected outcomes before choosing the next step.",
-        reason: "A decision-oriented CTA gives the reader more useful context than a generic prompt.",
+        beforeText: edit.before,
+        afterText: edit.after,
+        reason: "Uses a more decision-oriented phrase and preserves any bullet marker, table delimiter, and remaining sentences.",
         evidence: "Generic CTA phrase detected in the submitted copy.",
         confidence: 91,
       });
     }
 
-    const sentences = value.split(/(?<=[.!?])\s+/);
-    const longSentence = sentences.find((sentence) => sentence.trim().split(/\s+/).length > 34);
-    if (longSentence) {
-      const words = longSentence.trim().split(/\s+/);
-      findings.push({
-        exactLocation: location,
-        category: "Readability",
-        issue: "Sentence exceeds 34 words",
-        action: "REWRITE",
-        priority: "Medium",
-        beforeText: longSentence.trim(),
-        afterText: `${words.slice(0, 20).join(" ")}. ${words.slice(20).join(" ")}`,
-        reason: "Splitting the sentence improves scanability without adding a new factual claim.",
-        evidence: `${words.length}-word sentence detected.`,
-        confidence: 88,
-      });
+    if (
+      (block.kind === "paragraph" || block.kind === "quote") &&
+      !/<[^>]+>/.test(block.raw)
+    ) {
+      const sentences = block.raw.split(/(?<=[.!?])\s+/);
+      const longSentence = sentences.find(
+        (sentence) => sentence.trim().split(/\s+/).length > 34,
+      );
+      if (longSentence) {
+        const words = longSentence.trim().split(/\s+/);
+        findings.push({
+          exactLocation: block.location,
+          contentKind: block.kind,
+          category: "Readability",
+          issue: "Narrative sentence exceeds 34 words",
+          action: "REWRITE",
+          priority: "Medium",
+          beforeText: longSentence.trim(),
+          afterText:
+            words.slice(0, 20).join(" ") +
+            ". " +
+            words.slice(20).join(" "),
+          reason: "Splits one narrative sentence without changing bullets, table cells, headings, or other surrounding blocks.",
+          evidence: words.length + "-word narrative sentence detected.",
+          confidence: 88,
+        });
+      }
     }
   }
 
-  const wordCount = input.content.trim().split(/\s+/).filter(Boolean).length;
+  const plainContent = blocks.map((block) => block.plainText).join(" ");
+  const wordCount = plainContent.split(/\s+/).filter(Boolean).length;
   const keyword = input.primaryKeyword?.trim();
   const keywordCount = keyword
-    ? (input.content.toLowerCase().match(new RegExp(keyword.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g")) ?? []).length
+    ? (plainContent.toLowerCase().match(
+        new RegExp(escapeRegExp(keyword.toLowerCase()), "g"),
+      ) ?? []).length
     : 0;
+
   if (keyword && keywordCount === 0) {
     findings.push({
       exactLocation: "Page-wide",
+      contentKind: "page",
       category: "Search intent",
       issue: "Primary keyword is absent",
       action: "ADD",
       priority: "High",
       beforeText: "The exact primary topic is not stated in the submitted copy.",
-      afterText: `Add “${keyword}” naturally to the title, opening context, or the most relevant section after confirming fit.`,
-      reason: "The page should clearly establish its primary topic without forced repetition.",
+      afterText: "Add “" + keyword + "” naturally to the most relevant existing block after confirming fit.",
+      reason: "The page should clearly establish its primary topic without forcing it into an unrelated bullet or table cell.",
       evidence: "Zero exact-match occurrences found.",
       confidence: 97,
     });
   } else if (keyword && wordCount > 0 && keywordCount / wordCount > 0.035) {
     findings.push({
       exactLocation: "Page-wide",
+      contentKind: "page",
       category: "Search quality",
       issue: "Primary keyword may be overused",
       action: "CLEAN",
       priority: "High",
-      beforeText: `${keywordCount} exact uses across ${wordCount} words.`,
-      afterText: "Keep only contextually necessary uses and replace forced repetitions with clear topic language.",
+      beforeText: keywordCount + " exact uses across " + wordCount + " words.",
+      afterText: "Keep only contextually necessary uses and preserve the page's existing lists and tables.",
       reason: "Natural topical coverage is stronger than repetitive exact-match phrasing.",
       evidence: "Exact-match usage exceeds the conservative 3.5% review threshold.",
       confidence: 86,
     });
   }
 
-  if (!blocks.some((block) => /^#{1,3}\s/.test(block)) && wordCount > 250) {
+  if (!blocks.some((block) => block.kind === "heading") && wordCount > 250) {
     findings.push({
       exactLocation: "Page structure",
+      contentKind: "page",
       category: "Information architecture",
       issue: "Long content has no explicit section headings",
       action: "ADD",
       priority: "Medium",
-      beforeText: "No Markdown H1–H3 headings detected.",
-      afterText: "Add descriptive H2 headings around distinct user questions and decision points.",
+      beforeText: "No Markdown or HTML H1–H6 headings detected.",
+      afterText: "Add descriptive H2 headings around distinct user questions and decision points without converting existing lists or tables.",
       reason: "Clear sections help readers scan the page and understand its topic hierarchy.",
-      evidence: `${wordCount} words reviewed with no detected Markdown heading.`,
+      evidence: wordCount + " words reviewed with no detected heading.",
       confidence: 82,
     });
   }
 
   const capped = findings.slice(0, 40);
-  const score = Math.max(35, 100 - capped.reduce((sum, finding) => {
-    return sum + ({ Critical: 18, High: 11, Medium: 6, Low: 2 }[finding.priority]);
-  }, 0));
+  const score = Math.max(
+    35,
+    100 -
+      capped.reduce(
+        (sum, finding) =>
+          sum +
+          { Critical: 18, High: 11, Medium: 6, Low: 2 }[finding.priority],
+        0,
+      ),
+  );
+  const bulletCount = blocks.filter((block) => block.kind === "bullet").length;
+  const tableRowCount = blocks.filter((block) => block.kind === "table_row").length;
   const checks: AuditResult["checks"] = [
-    { name: "Original preserved", status: "pass", detail: "Version 0 remains immutable." },
-    { name: "American English", status: capped.some((f) => f.category === "American English") ? "warning" : "pass", detail: input.languageStandard },
-    { name: "Unsupported claims", status: capped.some((f) => f.category === "Accuracy and trust") ? "warning" : "pass", detail: "Absolute claims require evidence." },
-    { name: "Duplicate blocks", status: capped.some((f) => f.category === "Duplication") ? "warning" : "pass", detail: "Exact in-document duplicate scan completed." },
-    { name: "Primary topic", status: keyword && keywordCount === 0 ? "fail" : "pass", detail: keyword || "No primary keyword supplied." },
-    { name: "Manual approval", status: "pass", detail: "Publishing remains blocked until review is complete." },
+    {
+      name: "Original preserved",
+      status: "pass",
+      detail: "Version 0 remains immutable.",
+    },
+    {
+      name: "Structure detected",
+      status: "pass",
+      detail:
+        bulletCount +
+        " bullets and " +
+        tableRowCount +
+        " table rows were isolated from narrative paragraphs.",
+    },
+    {
+      name: "American English",
+      status: capped.some((finding) => finding.category === "American English")
+        ? "warning"
+        : "pass",
+      detail: input.languageStandard,
+    },
+    {
+      name: "Unsupported claims",
+      status: capped.some((finding) => finding.category === "Accuracy and trust")
+        ? "warning"
+        : "pass",
+      detail: "Absolute claims require evidence.",
+    },
+    {
+      name: "Duplicate blocks",
+      status: capped.some((finding) => finding.category === "Duplication")
+        ? "warning"
+        : "pass",
+      detail: "Paragraph, bullet, and table-row duplication checked separately.",
+    },
+    {
+      name: "Primary topic",
+      status: keyword && keywordCount === 0 ? "fail" : "pass",
+      detail: keyword || "No primary keyword supplied.",
+    },
+    {
+      name: "Manual approval",
+      status: "pass",
+      detail: "Publishing remains blocked until review is complete.",
+    },
   ];
 
   return {
@@ -238,8 +339,11 @@ function rulesAudit(input: AuditInput): AuditResult {
     model: null,
     score,
     summary: capped.length
-      ? `${capped.length} traceable change${capped.length === 1 ? "" : "s"} found. Review each proposed edit before applying or publishing.`
-      : "No high-confidence mechanical issues were found. A human or AI semantic review is still recommended.",
+      ? capped.length +
+        " traceable change" +
+        (capped.length === 1 ? "" : "s") +
+        " found. Bullets, table rows, headings, and paragraphs were reviewed as separate structures."
+      : "No high-confidence mechanical issues were found. Bullets, tables, headings, and paragraphs were still classified separately.",
     findings: capped,
     checks,
   };
@@ -250,22 +354,94 @@ function readRuntime(name: string) {
 }
 
 function extractOutputText(payload: unknown) {
-  const record = payload as { output_text?: string; output?: Array<{ content?: Array<{ text?: string }> }> };
+  const record = payload as {
+    output_text?: string;
+    output?: Array<{ content?: Array<{ text?: string }> }>;
+  };
   if (record.output_text) return record.output_text;
-  return record.output?.flatMap((item) => item.content ?? []).map((item) => item.text ?? "").join("") ?? "";
+  return (
+    record.output
+      ?.flatMap((item) => item.content ?? [])
+      .map((item) => item.text ?? "")
+      .join("") ?? ""
+  );
 }
 
-async function openAIAudit(input: AuditInput, fallback: AuditResult): Promise<AuditResult | null> {
+function findingSchema() {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: [
+      "exactLocation",
+      "contentKind",
+      "category",
+      "issue",
+      "action",
+      "priority",
+      "beforeText",
+      "afterText",
+      "reason",
+      "evidence",
+      "confidence",
+    ],
+    properties: {
+      exactLocation: { type: "string" },
+      contentKind: {
+        type: "string",
+        enum: ["paragraph", "heading", "bullet", "table_row", "quote", "code", "page"],
+      },
+      category: { type: "string" },
+      issue: { type: "string" },
+      action: {
+        type: "string",
+        enum: ["CLEAN", "CORRECT", "REWRITE", "ADD", "REMOVE", "VERIFY"],
+      },
+      priority: {
+        type: "string",
+        enum: ["Critical", "High", "Medium", "Low"],
+      },
+      beforeText: { type: "string" },
+      afterText: { type: "string" },
+      reason: { type: "string" },
+      evidence: { type: "string" },
+      confidence: { type: "integer", minimum: 0, maximum: 100 },
+    },
+  };
+}
+
+async function openAIAudit(
+  input: AuditInput,
+  fallback: AuditResult,
+): Promise<AuditResult | null> {
   const apiKey = readRuntime("OPENAI_API_KEY");
   if (!apiKey) return null;
   const model = readRuntime("OPENAI_MODEL") || "gpt-5.4-mini";
+  const structure = parseContentBlocks(input.content).map((block) => ({
+    kind: block.kind,
+    location: block.location,
+    raw: block.raw,
+  }));
   const response = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+    headers: {
+      Authorization: "Bearer " + apiKey,
+      "content-type": "application/json",
+    },
     body: JSON.stringify({
       model,
-      instructions: "You are a senior American content editor and SEO quality reviewer. Never invent facts, rankings, prices, statistics, testimonials, or competitor findings. Produce a surgical change log. Every change must quote exact supplied text, give an exact paragraph or heading location, preserve meaning unless a factual correction is required, and explain the reader/SEO/trust benefit. Findings unsupported by the supplied content must be marked VERIFY. Return only JSON.",
-      input: JSON.stringify({ brief: input, deterministicPrecheck: fallback.findings }),
+      instructions:
+        "You are a senior American content editor and SEO quality reviewer. Never invent facts, rankings, prices, statistics, testimonials, or competitor findings. Produce atomic, surgical changes. Respect the supplied structural classification: a bullet must remain one bullet, a table row must retain its delimiters and cell count, and neither may be rewritten as a paragraph. Never shorten a multi-sentence bullet by returning only its first sentence. Quote exact source text and preserve all unaffected sentences. Use VERIFY when evidence is missing. Return only JSON.",
+      input: JSON.stringify({
+        brief: {
+          title: input.title,
+          primaryKeyword: input.primaryKeyword,
+          targetMarket: input.targetMarket,
+          languageStandard: input.languageStandard,
+          niche: input.niche,
+        },
+        structure,
+        deterministicPrecheck: fallback.findings,
+      }),
       text: {
         format: {
           type: "json_schema",
@@ -279,66 +455,102 @@ async function openAIAudit(input: AuditInput, fallback: AuditResult): Promise<Au
               score: { type: "integer", minimum: 0, maximum: 100 },
               summary: { type: "string" },
               findings: {
-                type: "array", maxItems: 40,
-                items: {
-                  type: "object", additionalProperties: false,
-                  required: ["exactLocation", "category", "issue", "action", "priority", "beforeText", "afterText", "reason", "evidence", "confidence"],
-                  properties: {
-                    exactLocation: { type: "string" }, category: { type: "string" }, issue: { type: "string" },
-                    action: { type: "string", enum: ["CLEAN", "CORRECT", "REWRITE", "ADD", "REMOVE", "VERIFY"] },
-                    priority: { type: "string", enum: ["Critical", "High", "Medium", "Low"] },
-                    beforeText: { type: "string" }, afterText: { type: "string" }, reason: { type: "string" }, evidence: { type: "string" },
-                    confidence: { type: "integer", minimum: 0, maximum: 100 }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
+                type: "array",
+                maxItems: 40,
+                items: findingSchema(),
+              },
+            },
+          },
+        },
+      },
     }),
   });
-  if (!response.ok) throw new Error(`OpenAI audit failed with status ${response.status}`);
-  const parsed = JSON.parse(extractOutputText(await response.json())) as Pick<AuditResult, "score" | "summary" | "findings">;
-  return { provider: "openai", model, score: parsed.score, summary: parsed.summary, findings: parsed.findings, checks: fallback.checks };
+  if (!response.ok) {
+    throw new Error("OpenAI audit failed with status " + response.status);
+  }
+  const parsed = JSON.parse(extractOutputText(await response.json())) as Pick<
+    AuditResult,
+    "score" | "summary" | "findings"
+  >;
+  return {
+    provider: "openai",
+    model,
+    score: parsed.score,
+    summary: parsed.summary,
+    findings: parsed.findings,
+    checks: fallback.checks,
+  };
 }
 
-export async function runContentAudit(input: AuditInput, options?: { rulesOnly?: boolean }): Promise<AuditResult> {
+export async function runContentAudit(
+  input: AuditInput,
+  options?: { rulesOnly?: boolean },
+): Promise<AuditResult> {
   const fallback = rulesAudit(input);
   if (options?.rulesOnly) return fallback;
   try {
     return (await openAIAudit(input, fallback)) ?? fallback;
   } catch {
-    return { ...fallback, summary: `${fallback.summary} OpenAI was unavailable, so this run used the deterministic review engine.` };
+    return {
+      ...fallback,
+      summary:
+        fallback.summary +
+        " OpenAI was unavailable, so this run used the deterministic review engine.",
+    };
   }
 }
 
 export async function recheckFinding(
   finding: AuditFinding,
   reviewerInstruction: string,
-): Promise<Pick<AuditFinding, "afterText" | "reason" | "evidence" | "confidence" | "priority"> | null> {
+): Promise<
+  Pick<
+    AuditFinding,
+    "afterText" | "reason" | "evidence" | "confidence" | "priority"
+  > | null
+> {
   const apiKey = readRuntime("OPENAI_API_KEY");
   if (!apiKey) return null;
   const model = readRuntime("OPENAI_MODEL") || "gpt-5.4-mini";
   const response = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+    headers: {
+      Authorization: "Bearer " + apiKey,
+      "content-type": "application/json",
+    },
     body: JSON.stringify({
       model,
-      instructions: "You are a senior American content editor. Recheck one proposed edit against the reviewer's instruction. Preserve verified meaning, do not invent facts, and return only the corrected suggestion as strict JSON.",
+      instructions:
+        "Recheck one proposed edit against the reviewer's instruction. Preserve verified meaning and every unaffected sentence. Keep bullets as bullets and table rows with the same delimiters and cell count. Never invent facts. Return only JSON.",
       input: JSON.stringify({ finding, reviewerInstruction }),
-      text: { format: {
-        type: "json_schema", name: "rechecked_change", strict: true,
-        schema: {
-          type: "object", additionalProperties: false,
-          required: ["afterText", "reason", "evidence", "confidence", "priority"],
-          properties: {
-            afterText: { type: "string" }, reason: { type: "string" }, evidence: { type: "string" },
-            confidence: { type: "integer", minimum: 0, maximum: 100 },
-            priority: { type: "string", enum: ["Critical", "High", "Medium", "Low"] },
+      text: {
+        format: {
+          type: "json_schema",
+          name: "rechecked_change",
+          strict: true,
+          schema: {
+            type: "object",
+            additionalProperties: false,
+            required: [
+              "afterText",
+              "reason",
+              "evidence",
+              "confidence",
+              "priority",
+            ],
+            properties: {
+              afterText: { type: "string" },
+              reason: { type: "string" },
+              evidence: { type: "string" },
+              confidence: { type: "integer", minimum: 0, maximum: 100 },
+              priority: {
+                type: "string",
+                enum: ["Critical", "High", "Medium", "Low"],
+              },
+            },
           },
         },
-      } },
+      },
     }),
   });
   if (!response.ok) return null;

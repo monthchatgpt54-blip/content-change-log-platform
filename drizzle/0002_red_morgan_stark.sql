@@ -1,0 +1,1 @@
+ALTER TABLE `change_entries` ADD `content_kind` text DEFAULT 'paragraph' NOT NULL;

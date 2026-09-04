@@ -80,3 +80,23 @@ test("renders sidebar skeletons deterministically", async () => {
   assert.equal(first, second);
   assert.match(first, /--skeleton-width:70%/);
 });
+
+test("classifies paragraphs, bullets, and table rows separately", async () => {
+  const { parseContentBlocks, excerptContaining } = await vite.ssrLoadModule(
+    "/lib/content-structure.ts",
+  );
+  const blocks = parseContentBlocks(
+    "Opening sentence.\nSecond paragraph line.\n\n- First bullet. Keep this sentence.\n- Second bullet.\n\n| Feature | Value |\n|---|---|\n| Size | M |",
+  );
+
+  assert.deepEqual(
+    blocks.map((block) => block.kind),
+    ["paragraph", "bullet", "bullet", "table_row", "table_row", "table_row"],
+  );
+  assert.equal(
+    excerptContaining(blocks[1], /First bullet/i),
+    "- First bullet. Keep this sentence.",
+  );
+  assert.match(blocks[1].location, /^Bullet 1$/);
+  assert.match(blocks[5].location, /^Table row 3$/);
+});

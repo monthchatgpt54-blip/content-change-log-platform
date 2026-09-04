@@ -119,6 +119,7 @@ export async function saveAudit(input: SaveAuditInput) {
       sequence: index + 1,
       reference: `${auditReference}-${String(index + 1).padStart(3, "0")}`,
       exactLocation: finding.exactLocation,
+      contentKind: finding.contentKind,
       category: finding.category,
       issue: finding.issue,
       action: finding.action,
